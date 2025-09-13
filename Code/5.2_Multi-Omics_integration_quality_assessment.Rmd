@@ -1,0 +1,142 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r, warning=FALSE}
+R.version # version 4.5.1
+```
+
+# 1 Install libraries
+
+```{r, warning=FALSE}
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# # The following initialiaes usage of Bioc devel
+# BiocManager::install(version='devel')
+# 
+# BiocManager::install("MOFA2")
+
+# install.packages("tidyverse")
+```
+
+# 2 Load libraries
+
+```{r, warning=FALSE}
+library(ggplot2)
+library(MOFA2)
+library(tidyverse)
+```
+
+# 3 Set directory
+
+```{r, warning=FALSE}
+# Set the working directory as where this R file is located
+setwd("C:/Users/gyeon/Desktop/FU/02_SoSe25/DSLS/group_project/MOFA")
+getwd()
+```
+
+# 4 Variance decomposition
+
+## 4.1 Find the optimal number of factors
+
+### 4.1.1 Generate the data.frame to save the variance explained of models
+
+```{r, warning=FALSE}
+model_info = c("5mixed", "10mixed", "15mixed", "20mixed", "25mixed",
+               "26mixed", "27mixed", "28mixed", "29mixed", "30mixed",
+               "31mixed", "32mixed", "33mixed", "34mixed", "35mixed")
+n <- length(model_info)
+
+# Initialise the data.frame to save the variance explained of models
+df_ve <- data.frame(num_factor = rep(NA, n),
+                    CNV = rep(NA, n),
+                    Methylation = rep(NA, n),
+                    Protein = rep(NA, n),
+                    RNAseq = rep(NA, n),
+                    SNV = rep(NA, n))
+
+iter = 1
+for (info in model_info) {
+  # Load the model
+  model_name = paste("input/trained_model_factor_", info, ".hdf5", sep = "")
+  model = load_model(model_name)
+  
+  # Print the results
+  if (info == "5mixed")
+    print(paste("For the model with", substr(info, 1, 1), "factors"))
+  else print(paste("For the model with", substr(info, 1, 2), "factors"))
+  print(head(get_variance_explained(model)$r2_total[[1]]))
+  
+  # Save the results
+  if (info == "5mixed")
+    df_ve$num_factor[iter] <- substr(model_info[iter], start=1, stop=1)
+  else df_ve$num_factor[iter] <- substr(model_info[iter], start=1, stop=2)
+  df_ve[iter, -1] <- get_variance_explained(model)$r2_total[[1]]
+  
+  # Increase iter
+  iter = iter + 1
+}
+
+# Convert the num_factor column as numeric
+# str(df_ve)
+df_ve$num_factor <- as.numeric(df_ve$num_factor)
+str(df_ve)
+
+# Print the result
+print(df_ve)
+```
+
+### 4.1.2 Visualise the results
+
+```{r, warning=FALSE}
+df_ve_long <- df_ve %>%
+  pivot_longer(
+    cols = -num_factor,
+    names_to = "OmicsLayer",
+    values_to = "VE"
+  )
+
+# Plot line chart of variance explained across number of factors
+ggplot(df_ve_long, aes(x = num_factor, y = VE, colour = OmicsLayer)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(
+    title = "Variance Explained per Omics Layer by Number of Factors",
+    x = "Number of Factors",
+    y = "Variance Explained (%)"
+  )
+```
+
+## 4.2 Total variance explained per view
+
+```{r, warning=FALSE}
+# Load the finally chosen model
+model <- load_model("input/trained_model_factor_30mixed.hdf5")
+```
+
+```{r, warning=FALSE}
+# Total variance explained per view
+head(get_variance_explained(model)$r2_total[[1]])
+```
+
+```{r, warning=FALSE}
+# Visualisation
+plot_variance_explained(model, x="view", y="factor", plot_total = TRUE)[[2]]
+```
+
+## 4.3 Variance explained for every factor per view
+
+```{r, warning=FALSE}
+# Print the numeric table
+get_variance_explained(model)$r2_per_factor[[1]]
+```
+
+```{r, warning=FALSE}
+# Visualisation
+# ?plot_variance_explained
+plot_variance_explained(model, x="view", y="factor") +
+  theme(axis.text.y = element_text(size = 8))
+```

@@ -1,0 +1,469 @@
+---
+title: "TCGA_preprocess_snv"
+author: "luojingwen"
+date: "2025-06-21"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    extra_dependencies: ["ctex"]
+header-includes:
+  - \usepackage{ctex}
+lang: en
+editor_options: 
+  chunk_output_type: inline
+---
+
+#library
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+options(stringsAsFactors = F)
+
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(reshape2)
+library(maftools)
+library(pheatmap)
+library(gridExtra)
+library(ggplot2)
+library(RColorBrewer)
+
+```
+
+## load data
+```{r}
+snv_GBM <- read.table(gzfile("../data/omics_Xena_GDC_TCGA/TCGA-GBM.somaticmutation_wxs.tsv.gz"), sep = "\t", header = TRUE) %>% filter(start !=-1)
+
+snv_LGG <- read.table(gzfile("../data/omics_Xena_GDC_TCGA/TCGA-LGG.somaticmutation_wxs.tsv.gz"), sep = "\t", header = TRUE) %>% filter(start !=-1)
+
+outpath="../data/preprocessed_TCGA/"
+```
+
+```{r}
+snv_GBM %>% group_by(sample) %>% summarise(snv = n()) %>% 
+  ggplot( aes(x = snv)) + geom_histogram(binwidth = 5, fill = "lightblue", colour = "black")+ggtitle("SNV sample distribution in GBM")
+
+snv_LGG %>% group_by(sample) %>% summarise(snv = n()) %>% ggplot( aes(x = snv)) +
+    geom_histogram(binwidth = 5, fill = "lightblue", colour = "black")+
+    ggtitle("SNV sample distribution in LGG")
+
+
+snv_GBM %>% group_by(sample) %>% summarise(snv = n()) %>% mutate(type = "GBM") %>% 
+  rbind(snv_LGG %>% group_by(sample) %>% summarise(snv = n()) %>% mutate(type = "LGG")) %>%
+  ggplot(aes(x = type, y = snv, fill = factor(type))) + 
+  geom_boxplot() + 
+  scale_y_continuous(
+    trans = "log10",
+    breaks = c(1, 10, 100, 1000, 10000)) +
+  scale_fill_brewer(palette = "Pastel2") +
+  ggtitle("SNV records counts in GBM/LGG")+
+  labs(y = "SNV count (log scale)", fill = "Type")+theme_minimal()
+```
+
+## Function: VAF-based mutation matrix
+```{r}
+
+create_vaf_dataframe <- function(snv_df, vaf_col = "dna_vaf", gene_col = "gene", sample_col = "sample", vaf_filter = NULL) {
+
+  # Step 0: ensure data.table
+  snv_df <- as.data.table(snv_df)
+
+  # Step 1: optional VAF filter
+  if (!is.null(vaf_filter)) {
+    snv_df <- snv_df[get(vaf_col) > vaf_filter]
+  }
+
+  # Step 2: aggregate by sample × gene to get max VAF
+  snv_df_agg <- snv_df[, .(vaf = max(get(vaf_col), na.rm = TRUE)), by = c(sample_col, gene_col)]
+
+  # Step 3: dcast to sample × gene matrix (wide format), keep NA
+  mutation_matrix <- dcast(
+    snv_df_agg,
+    formula = as.formula(paste(sample_col, "~", gene_col)),
+    value.var = "vaf"
+  )
+
+  # Step 4: transpose and reshape
+  sample_ids <- mutation_matrix[[sample_col]]
+  mutation_matrix[[sample_col]] <- NULL
+
+  mutation_matrix_t <- t(as.matrix(mutation_matrix))
+  colnames(mutation_matrix_t) <- sample_ids
+
+  df <- as.data.frame(mutation_matrix_t)
+  df$gene <- rownames(df)
+  df <- df[, c("gene", setdiff(colnames(df), "gene"))]
+
+  return(df)
+}
+
+
+```
+
+## Check missing values
+```{r}
+mutation_matrix_GBM <- create_vaf_dataframe(snv_GBM)
+mutation_matrix_LGG <- create_vaf_dataframe(snv_LGG)
+
+na_counts_GBM <- rowSums(is.na(mutation_matrix_GBM[, -1]))
+
+na_df_GBM <- data.frame(
+  gene = mutation_matrix_GBM$gene,
+  n_missing = na_counts_GBM,
+  row.names = NULL
+)
+
+ggplot(na_df_GBM, aes(x = n_missing)) +
+      geom_histogram(binwidth = 5, fill = "skyblue", color = "white") +
+      xlab("Missing values") +
+      ylab("Gene Counts") +
+      ggtitle("Histogram of Missing Values") +
+      theme_minimal()
+
+
+na_counts_LGG <- rowSums(is.na(mutation_matrix_LGG[, -1]))
+
+na_df_LGG <- data.frame(
+  gene = mutation_matrix_LGG$gene,
+  n_missing = na_counts_LGG,
+  row.names = NULL
+)
+
+ggplot(na_df_LGG, aes(x = n_missing)) +
+      geom_histogram(binwidth = 5, fill = "skyblue", color = "white") +
+      xlab("Missing values") +
+      ylab("Gene Counts") +
+      ggtitle("Histogram of Missing Values") +
+      theme_minimal()
+```
+## OUTPUT: fill with 0 and mutation matrix
+```{r}
+mutation_matrix_GBM[, -1] <- lapply(mutation_matrix_GBM[, -1], function(x) {
+  x[is.na(x)] <- 0
+  return(x)
+})
+
+mutation_matrix_LGG[, -1] <- lapply(mutation_matrix_LGG[, -1], function(x) {
+  x[is.na(x)] <- 0
+  return(x)
+})
+
+
+#mutation_matrix_GBM %>% write.table(gzfile(paste0(outpath,"TCGA_GBM_mutation.tsv.gz")),sep="\t",col.names = T,row.names =F,quote = F)
+
+#mutation_matrix_LGG %>% write.table(gzfile(paste0(outpath,"TCGA_LGG_mutation.tsv.gz")),sep="\t",col.names = T,row.names =F,quote = F)
+```
+
+# Genaral Summary
+## Function: plot distribution of mutation
+```{r}
+plot_mutation_frequency <- function(vaf_df,
+                                    top_n = 50,
+                                    plot_type = c("bar", "hist")) {
+
+  rownames(vaf_df) <- vaf_df$gene
+  vaf_matrix <- as.matrix(vaf_df[, -1])
+
+  # calculate mutation frequency
+  mutation_counts <- rowSums(vaf_matrix > 0)
+  mutation_freq_df <- data.frame(
+    gene = names(mutation_counts),
+    mutated_samples = mutation_counts,
+    mutation_frequency = mutation_counts / ncol(vaf_matrix)
+  )
+
+  plot_type <- match.arg(plot_type)
+  p <- NULL
+  if (plot_type == "bar") {
+    top_genes_df <- head(mutation_freq_df[order(-mutation_freq_df$mutation_frequency), ], top_n)
+    top_genes_df$gene <- factor(top_genes_df$gene, levels = top_genes_df$gene[order(top_genes_df$mutation_frequency)])
+
+    p <- ggplot(top_genes_df, aes(x = gene, y = mutation_frequency)) +
+      geom_bar(stat = "identity", fill = "tomato") +
+      coord_flip() +
+      ylab("Mutation Frequency") +
+      xlab("Gene") +
+      ggtitle(paste("Top", top_n, "Mutated Genes")) +
+      theme_minimal()
+  } else if (plot_type == "hist") {
+    p <- ggplot(mutation_freq_df, aes(x = mutation_frequency)) +
+      geom_histogram(binwidth = 0.01, fill = "skyblue", color = "white") +
+      xlab("Mutation Frequency") +
+      ylab("Gene Count") +
+      ggtitle("Histogram of Gene Mutation Frequencies") +
+      theme_minimal()
+  }
+  print(p)
+  return(invisible(mutation_freq_df))
+}
+
+```
+
+### Plot: TOP20 mutated genes
+```{r}
+plot_mutation_frequency(mutation_matrix_GBM,top_n = 20)
+plot_mutation_frequency(mutation_matrix_LGG,top_n = 20)
+```
+### Plot: distrubution of frequency
+
+```{r}
+plot_mutation_frequency(mutation_matrix_GBM, plot_type = "hist")
+plot_mutation_frequency(mutation_matrix_LGG, plot_type = "hist")
+```
+## Function: create MAF Obj 
+```{r}
+build_maf_from_xena <- function(snv_df) {
+  # infer Variant_Type
+  infer_variant_type <- function(ref, alt) {
+    ref_len <- nchar(ref)
+    alt_len <- nchar(alt)
+
+    if (ref_len == 1 && alt_len == 1) {
+      return("SNP")
+    } else if (ref_len == 0 && alt_len > 0) {
+      return("INS")
+    } else if (ref_len > 0 && alt_len == 0) {
+      return("DEL")
+    } else if (ref_len == alt_len) {
+      if (ref_len == 2) return("DNP")
+      if (ref_len == 3) return("TNP")
+      return("ONP")
+    } else if (ref_len < alt_len) {
+      return("INS")
+    } else {
+      return("DEL")
+    }
+  }
+  
+  map_variant_classification <- function(vc) {
+    vc <- tolower(vc)  # 小写统一
+    if (grepl("missense", vc)) return("Missense_Mutation")
+    if (grepl("nonsense|stop_gained", vc)) return("Nonsense_Mutation")
+    if (grepl("frameshift", vc)) return("Frame_Shift_Indel")
+    if (grepl("inframe_deletion", vc)) return("In_Frame_Del")
+    if (grepl("inframe_insertion", vc)) return("In_Frame_Ins")
+    if (grepl("start_lost", vc)) return("Translation_Start_Site")
+    if (grepl("stop_lost", vc)) return("Nonstop_Mutation")
+    if (grepl("splice", vc)) return("Splice_Site")
+    if (grepl("synonymous", vc)) return("Silent")
+    return("Other")  # 默认保底
+  }
+
+  # create MAF
+  maf_df <- data.frame(
+    Hugo_Symbol = snv_df$gene,
+    Chromosome = gsub("chr", "", snv_df$chrom),
+    Start_Position = snv_df$start,
+    End_Position = snv_df$end,
+    Reference_Allele = snv_df$ref,
+    Tumor_Seq_Allele2 = snv_df$alt,
+    Variant_Classification = sapply(snv_df$effect, map_variant_classification),
+    Variant_Type = variant_types <- mapply(infer_variant_type, snv_df$ref, snv_df$alt),
+    Tumor_Sample_Barcode = snv_df$sample,
+    Amino_Acid_Change = snv_df$Amino_Acid_Change,
+    Caller = snv_df$callers,
+    t_alt_freq = snv_df$dna_vaf,
+    stringsAsFactors = FALSE
+  )
+
+  return(maf_df)
+}
+```
+
+### Plot: Summary - GBM
+```{r}
+maf_GBM <- build_maf_from_xena(snv_GBM)
+
+maf_obj_GBM <- read.maf(maf = maf_GBM)
+
+plotmafSummary(maf = maf_obj_GBM, rmOutlier = TRUE, 
+			   addStat = 'median', dashboard = TRUE, 
+			   titvRaw = FALSE)
+
+```
+
+### Plot: Summary - LGG
+```{r}
+maf_LGG <- build_maf_from_xena(snv_LGG)
+
+maf_obj_LGG <- read.maf(maf = maf_LGG)
+
+plotmafSummary(maf = maf_obj_LGG, rmOutlier = TRUE, 
+			   addStat = 'median', dashboard = TRUE, 
+			   titvRaw = FALSE)
+
+```
+## extract IDH status
+
+hotspots comes from:
+
+https://www.researchgate.net/publication/232256991_IDH1_and_IDH2_Mutations_in_Tumorigenesis_Mechanistic_Insights_and_Clinical_Perspectives
+
+```{r}
+find_IDH <- function(df) {
+  # Hotspot 
+  idh1_hotspots <- c("p.R132H", "p.R132C", "p.R132G", "p.R132S", "p.R132L", "p.R132V","p.R132P")
+  idh2_hotspots <- c("p.R72K", "p.R172M", "p.R172G", "p.R172W")
+  
+  df$Amino_Acid_Change <- as.character(df$Amino_Acid_Change)
+  
+  all_samples <- unique(df$sample)
+  
+  # get IDH1/IDH2 info
+  idh1_df <- subset(df, gene == "IDH1")
+  idh2_df <- subset(df, gene == "IDH2")
+  
+  # find samples have snv records
+  samples_in_snv <- unique(df$sample)
+  
+  result <- data.frame(sample = all_samples,
+                       IDH1_status = NA,
+                       IDH1_mutation = NA,
+                       IDH2_status = NA,
+                       IDH2_mutation = NA,
+                       stringsAsFactors = FALSE)
+  
+  for (s in all_samples) {
+    # --- IDH1 ---
+    idh1_mutations <- idh1_df$Amino_Acid_Change[idh1_df$sample == s]
+    if (length(idh1_mutations) > 0) {
+      if (any(idh1_mutations %in% idh1_hotspots)) {
+        result[result$sample == s, "IDH1_status"] <- "Mutant"
+        result[result$sample == s, "IDH1_mutation"] <- idh1_mutations[idh1_mutations %in% idh1_hotspots][1]
+      } else {
+        result[result$sample == s, "IDH1_status"] <- "Other"
+        result[result$sample == s, "IDH1_mutation"] <- idh1_mutations[1]
+      }
+    }
+    
+    # --- IDH2 ---
+    idh2_mutations <- idh2_df$Amino_Acid_Change[idh2_df$sample == s]
+    if (length(idh2_mutations) > 0) {
+      if (any(idh2_mutations %in% idh2_hotspots)) {
+        result[result$sample == s, "IDH2_status"] <- "Mutant"
+        result[result$sample == s, "IDH2_mutation"] <- idh2_mutations[idh2_mutations %in% idh2_hotspots][1]
+      } else {
+        result[result$sample == s, "IDH2_status"] <- "Other"
+        result[result$sample == s, "IDH2_mutation"] <- idh2_mutations[1]
+      }
+    }
+  }
+
+  # fill NA with Wildtype or Unknown
+  result <- result %>%
+    mutate(
+      IDH1_status = case_when(
+        !is.na(IDH1_status) ~ IDH1_status,
+        sample %in% samples_in_snv ~ "Wildtype",
+        TRUE ~ "Unknown"
+      ),
+      IDH2_status = case_when(
+        !is.na(IDH2_status) ~ IDH2_status,
+        sample %in% samples_in_snv ~ "Wildtype",
+        TRUE ~ "Unknown"
+      )
+    )
+  
+  return(result)
+}
+
+```
+
+```{r}
+clinical_GBM <- read.table("../result/clinical_data_GBM.tsv", sep = "\t" ,header = TRUE, stringsAsFactors = FALSE)
+clinical_LGG <- read.csv("../result/clinical_data_LGG.tsv",sep = "\t" , header = TRUE, stringsAsFactors = FALSE)
+
+idh_mut_GBM <- find_IDH(snv_GBM)
+idh_mut_LGG <- find_IDH(snv_LGG)
+
+idh_mut_GBM$patient_id <- substr(idh_mut_GBM$sample, 1, 12)
+clinical_merged_GBM <- merge(clinical_GBM, idh_mut_GBM, 
+                             by.x = "bcr_patient_barcode", 
+                             by.y = "patient_id", 
+                             all = TRUE) %>% 
+  mutate(IDH1_status = ifelse(is.na(IDH1_status), "Unknown", IDH1_status)) %>% 
+  mutate(gender = ifelse(is.na(gender), "Unknown", gender)) %>% 
+  mutate(histological_type = ifelse(is.na(histological_type), "Unknown", histological_type)) %>% 
+  filter(!bcr_patient_barcode %in% c("TCGA-06-0131", "TCGA-12-1601", "TCGA-32-2498"))
+  
+## exist in snv file but have no clinical info
+
+clinical_merged_GBM$sample[is.na(clinical_merged_GBM$sample)] <- "Unknown"
+
+
+idh_mut_LGG$patient_id <- substr(idh_mut_LGG$sample, 1, 12)
+clinical_merged_LGG <- merge(clinical_LGG, idh_mut_LGG, 
+                             by.x = "bcr_patient_barcode", 
+                             by.y = "patient_id", 
+                             all = TRUE) %>% 
+  mutate(IDH1_status = ifelse(is.na(IDH1_status), "Unknown", IDH1_status),
+         gender = ifelse(is.na(gender), "Unknown", gender),
+         histological_type = ifelse(is.na(histological_type), "Unknown", histological_type),
+         neoplasm_histologic_grade = ifelse(is.na(neoplasm_histologic_grade), "Unknown", neoplasm_histologic_grade),
+         neoplasm_histologic_grade = ifelse(bcr_patient_barcode =="TCGA-DU-7019", "Unknown", neoplasm_histologic_grade))
+
+clinical_merged_LGG$sample[is.na(clinical_merged_LGG$sample)] <- "Unknown"
+
+clinical_merged_GBM %>% write.table("../result/clinical_data_GBM_withIDH.tsv",sep = "\t",col.names = TRUE,row.names = FALSE,quote = FALSE)
+clinical_merged_LGG %>% write.table("../result/clinical_data_LGG_withIDH.tsv",sep = "\t",col.names = TRUE,row.names = FALSE,quote = FALSE)
+```
+
+## summary of clinical data
+```{r}
+#install.packages("tableone")  # 如果没装过
+#install.packages("officer")
+#install.packages("gtsummary")
+#install.packages("gt")
+library(gt)
+library(gtsummary)
+library(tableone)
+
+```
+
+### GBM
+```{r}
+cleaned <- clinical_merged_GBM %>%
+  mutate(age = cut(age_at_initial_pathologic_diagnosis,
+                   breaks = c(-Inf, 40, 60, Inf),
+                   labels = c("<40", "40-60", ">60"))) %>%
+  select(IDH1_status, gender, age, histological_type, days_to_death,IDH1_mutation) %>%
+  mutate(
+    IDH1_status = factor(IDH1_status, levels = c("Mutant", "Wildtype", "Unknown")),
+    gender = factor(gender, levels = setdiff(unique(gender), "Unknown") %>% c("Unknown")),
+    histological_type = factor(histological_type, levels = setdiff(unique(histological_type), "Unknown") %>% c("Unknown"))
+  )
+
+tbl <- cleaned %>%
+  tbl_summary(by = IDH1_status, missing = "ifany", digits = everything() ~ c(0, 1)) %>%
+  add_p() %>%
+  as_gt()
+
+gt::gtsave(tbl, filename = "../result/clinical_table_GBM.html") 
+gt::gtsave(tbl, filename = "../result/clinical_table_GBM.png")
+
+```
+
+### LGG
+```{r}
+cleaned_LGG <- clinical_merged_LGG %>%
+  mutate(age = cut(age_at_initial_pathologic_diagnosis,
+                   breaks = c(-Inf, 40, 60, Inf),
+                   labels = c("<40", "40-60", ">60"))) %>%
+  select(IDH1_status, gender, age, histological_type,neoplasm_histologic_grade, days_to_death,IDH1_mutation) %>%
+  mutate(
+    IDH1_status = factor(IDH1_status, levels = c("Mutant", "Wildtype")),
+    gender = factor(gender, levels = setdiff(unique(gender), "Unknown") %>% c("Unknown")),
+    histological_type = factor(histological_type, levels = setdiff(unique(histological_type), "Unknown") %>% c("Unknown"))
+  )
+
+tbl <- cleaned_LGG %>%
+  tbl_summary(by = IDH1_status, missing = "ifany", digits = everything() ~ c(0, 1)) %>%
+  add_p() %>%
+  as_gt()
+
+gt::gtsave(tbl, filename = "../result/clinical_table_LGG.html") 
+gt::gtsave(tbl, filename = "../result/clinical_table_LGG.png")
+
+```

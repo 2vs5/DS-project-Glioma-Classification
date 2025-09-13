@@ -1,0 +1,73 @@
+---
+title: "TCGA-clinical_info"
+author: "luojingwen"
+date: "2025-06-09"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    extra_dependencies: ["ctex"]
+header-includes:
+  - \usepackage{ctex}
+lang: en
+---
+
+## load library 
+
+https://github.com/ayueme/easyTCGA
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if(!require("BiocManager")) install.packages("BiocManager")
+if(!require("SummarizedExperiment")) BiocManager::install("SummarizedExperiment")
+if(!require("DESeq2")) BiocManager::install("DESeq2")
+if(!require("edgeR")) BiocManager::install("edgeR")
+if(!require("limma")) BiocManager::install("limma")
+
+if(!require("survival")) install.packages("survival")
+if(!require("broom")) install.packages("broom")
+if(!require("devtools")) install.packages("devtools")
+if(!require("reshape2")) install.packages("reshape2")
+if(!require("data.table")) install.packages("data.table")
+if(!require("ggplot2")) install.packages("ggplot2")
+if(!require("ggpubr")) install.packages("ggpubr")
+devtools::install_github("ayueme/easyTCGA")
+```
+
+## get clinical info
+```{r}
+library(easyTCGA)
+
+getclinical("TCGA-GBM")
+getclinical("TCGA-LGG")
+## default output is in ./output_clinical/, I changed outputdir name in case of error
+```
+
+## TCGA-GBM
+```{r}
+indexed_GBM <- load("../data/clinical_data/TCGA-GBM_clinical/TCGA-GBM_clinical_indexed.rdata")
+admin_GBM <- load("../data/clinical_data/TCGA-GBM_clinical/TCGA-GBM_clinicalXML_admin.rdata")
+drug_GBM <- load("../data/clinical_data/TCGA-GBM_clinical/TCGA-GBM_clinicalXML_drug.rdata")
+followup_GBM <- load("../data/clinical_data/TCGA-GBM_clinical/TCGA-GBM_clinicalXML_followUp.rdata")
+newTumorEvent_GBM <- load("../data/clinical_data/TCGA-GBM_clinical/TCGA-GBM_clinicalXML_newTumorEvent.rdata")
+patient_GBM <-load("../data/clinical_data/TCGA-GBM_clinical/TCGA-GBM_clinicalXML_patient.rdata")
+stagem_GBM <-load("../data/clinical_data/TCGA-GBM_clinical/TCGA-GBM_clinicalXML_stageEvent.rdata") ## null
+```
+
+```{r}
+clinicalXML_patient %>% select(bcr_patient_barcode,gender,age_at_initial_pathologic_diagnosis, days_to_death, days_to_last_followup,histological_type, prior_glioma) %>% write.table("../result/clinical_data_GBM.tsv",sep="\t",col.names = T,row.names =F,quote = F)
+```
+
+## TCGA-LGG
+```{r}
+indexed_LGG <- load("../data/clinical_data/TCGA-LGG_clinical/TCGA-LGG_clinical_indexed.rdata")
+admin_LGG <- load("../data/clinical_data/TCGA-LGG_clinical/TCGA-LGG_clinicalXML_admin.rdata")
+drug_LGG <- load("../data/clinical_data/TCGA-LGG_clinical/TCGA-LGG_clinicalXML_drug.rdata")
+followup_LGG <- load("../data/clinical_data/TCGA-LGG_clinical/TCGA-LGG_clinicalXML_followUp.rdata")
+newTumorEvent_LGG <- load("../data/clinical_data/TCGA-LGG_clinical/TCGA-LGG_clinicalXML_newTumorEvent.rdata")
+patient_LGG <-load("../data/clinical_data/TCGA-LGG_clinical/TCGA-LGG_clinicalXML_patient.rdata")
+stagem_LGG <-load("../data/clinical_data/TCGA-LGG_clinical/TCGA-LGG_clinicalXML_stageEvent.rdata") ## null
+```
+
+```{r}
+clinicalXML_patient %>% select(bcr_patient_barcode,gender,age_at_initial_pathologic_diagnosis, days_to_death, days_to_last_followup,histological_type, tumor_location, neoplasm_histologic_grade,supratentorial_localization,laterality,first_presenting_symptom) %>% write.table("../result/clinical_data_LGG.tsv",sep="\t",col.names = T,row.names =F,quote = F)
+```

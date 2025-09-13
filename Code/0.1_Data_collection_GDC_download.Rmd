@@ -1,0 +1,223 @@
+---
+title: "TCGA-download"
+author: "luojingwen"
+date: "2025-06-13"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    extra_dependencies: ["ctex"]
+header-includes:
+  - \usepackage{ctex}
+lang: en
+---
+
+## load library 
+
+https://github.com/ayueme/easyTCGA
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if(!require("BiocManager")) install.packages("BiocManager")
+if(!require("SummarizedExperiment")) BiocManager::install("SummarizedExperiment")
+if(!require("TCGAbiolinks")) BiocManager::install("TCGAbiolinks")
+if(!require("DESeq2")) BiocManager::install("DESeq2")
+if(!require("edgeR")) BiocManager::install("edgeR")
+if(!require("limma")) BiocManager::install("limma")
+
+if(!require("survival")) install.packages("survival")
+if(!require("broom")) install.packages("broom")
+if(!require("devtools")) install.packages("devtools")
+if(!require("reshape2")) install.packages("reshape2")
+if(!require("data.table")) install.packages("data.table")
+if(!require("ggplot2")) install.packages("ggplot2")
+if(!require("ggpubr")) install.packages("ggpubr")
+#devtools::install_github("ayueme/easyTCGA")
+```
+
+```{r}
+if(!require("TCGAbiolinks")) install.packages("TCGAbiolinks")
+library(TCGAbiolinks)
+```
+## TCGA Data Exploration Analysis
+
+DNA mutation, CNV, RNAseq, miRNA, protein (RPPA), methylation, and clinical metadata
+
+### summary("TCGA-GBM")
+
+TCGAbiolinks:::getProjectSummary("TCGA-GBM")
+
+$file_count
+[1] 30437
+
+$data_categories
+   file_count case_count                data_category
+1        9639        601  Simple Nucleotide Variation
+2        3251        428             Sequencing Reads
+3        2920        617                  Biospecimen
+4        1219        617                     Clinical
+5        6981        600        Copy Number Variation
+6        1898        572      Transcriptome Profiling
+7        1350        423              DNA Methylation
+8         243        237           Proteome Profiling
+9        1089        335 Somatic Structural Variation
+10       1847        375         Structural Variation
+
+### summary("TCGA-LGG")
+TCGAbiolinks:::getProjectSummary("TCGA-LGG")
+$file_count
+[1] 33704
+
+$data_categories
+   file_count case_count                data_category
+1       10776        516  Simple Nucleotide Variation
+2        4295        516             Sequencing Reads
+3        2614        516                  Biospecimen
+4        1064        516                     Clinical
+5        6802        515        Copy Number Variation
+6        2128        516      Transcriptome Profiling
+7        1602        516              DNA Methylation
+8         435        430           Proteome Profiling
+9        1497        452 Somatic Structural Variation
+10       2491        516         Structural Variation
+
+
+
+
+## get SNV
+Saved as: TCGA-XXX_SNV.Rdata
+
+Downloading data for project TCGA-GBM
+GDCdownload will download 464 files. A total of 18.623226 MB
+Downloading as: Fri_Jun_13_16_25_05_2025.tar.gz
+
+Downloading data for project TCGA-LGG
+GDCdownload will download 530 files. A total of 11.947939 MB
+Downloading as: Fri_Jun_13_16_30_27_2025.tar.gz
+```{r}
+projects <- c('TCGA-GBM','TCGA-LGG')
+sapply(projects, function(project){
+  
+  query_snp <- GDCquery(
+    project = project, 
+    data.category = "Simple Nucleotide Variation",
+    data.type = "Masked Somatic Mutation",
+    access = "open",
+    sample.type = "Primary Tumor" 
+)
+  
+  GDCdownload(query_snp)
+  
+  GDCprepare(query_snp, save = T,save.filename = paste0(project,"_SNV.Rdata"))
+  
+})
+```
+
+## get CNV
+Saved as: TCGA-XXX_CNV.Rdata
+
+Downloading data for project TCGA-GBM
+Of the 1160 files for download 615 already exist.
+We will download only those that are missing ones.
+GDCdownload will download 545 files. A total of 3.627694 MB
+Downloading as: Fri_Jun_13_16_41_53_2025.tar.gz
+
+Downloading data for project TCGA-LGG
+GDCdownload will download 1021 files. A total of 8.214285 MB
+Downloading as: Fri_Jun_13_16_48_49_2025.tar.gz
+Download failed. We will retry with smaller chunks
+Downloading chunk 1 of 1 (1021 files, size = 8.214285 MB) as Fri_Jun_13_16_48_49_2025_0.tar.gz
+```{r}
+projects <- c('TCGA-GBM','TCGA-LGG')
+
+sapply(projects, function(project){
+
+  query_cnv <- GDCquery(
+    project = project, 
+    data.category = "Copy Number Variation",
+    data.type = "Masked Copy Number Segment",
+    sample.type = "Primary Tumor" )
+  GDCdownload(query_cnv)
+  GDCprepare(query = query_cnv, save = TRUE, save.filename = paste0(project,"_CNV.Rdata"))
+
+  }
+)
+```
+
+## get mRNA
+Saved as: TCGA-XXX_mRNA.Rdata
+```{r}
+projects <- c('TCGA-GBM','TCGA-LGG')
+sapply(projects, function(project){
+  
+  query_mRNA <- GDCquery(
+    project = project,
+    data.category = "Transcriptome Profiling",
+    data.type = "Gene Expression Quantification",
+    workflow.type = "STAR - Counts",
+    sample.type = "Primary Tumor" 
+)
+  
+  GDCdownload(query_mRNA)
+  
+  GDCprepare(query_mRNA,save = T,save.filename = paste0(project,"_mRNA.Rdata"))
+  
+})
+```
+
+## get miRNA
+Saved as: TCGA-XXX_miRNA.Rdata
+
+Downloading data for project TCGA-GBM
+GDCdownload will download 278 files. A total of 14.117854 MB
+Downloading as: Fri_Jun_13_17_23_47_2025.tar.gz
+
+Downloading data for project TCGA-LGG
+GDCdownload will download 530 files. A total of 26.67012 MB
+Downloading as: Fri_Jun_13_17_26_58_2025.tar.gz
+```{r}
+projects <- c('TCGA-GBM','TCGA-LGG')
+sapply(projects, function(project){
+  
+  query_miRNA <- GDCquery(project = project,
+                    data.category = "Transcriptome Profiling",
+                    data.type = "miRNA Expression Quantification"
+                    )
+  GDCdownload(query_miRNA)
+  
+  GDCprepare(query_miRNA, save = T,save.filename = paste0(project,"_miRNA.Rdata"))
+  
+})
+```
+
+## get Methylation
+Saved as: TCGA-XXX_melthy.Rdata
+
+Downloading data for project TCGA-GBM
+GDCdownload will download 450 files. A total of 2.254576463 GB
+The total size of files is big. We will download files in chunks
+Downloading chunk 1 of 3 (199 files, size = 1.01540909 GB) as Fri_Jun_13_17_50_06_2025_0.tar.gz
+
+```{r}
+projects <- c('TCGA-GBM','TCGA-LGG')
+
+sapply(projects, function(project){
+  query.met <- GDCquery(
+    project = project,
+    data.category = "DNA Methylation",
+    data.type = "Methylation Beta Value",
+    platform = "Illumina Human Methylation 450",
+    sample.type = "Primary Tumor")
+  
+  GDCdownload(query.met, method = "api")
+
+  met_download <- GDCprepare(query = query.met, save = TRUE, save.filename = paste0(project,"_melthy.Rdata"))
+  }
+)
+```
+
+## References
+- https://docs.gdc.cancer.gov/Data/Bioinformatics_Pipelines/DNA_Seq_WGS/#bedpe-file-format
+
+- https://xenabrowser.net/datapages/?cohort=TCGA%20Glioblastoma%20(GBM)&removeHub=https%3A%2F%2Fxena.treehouse.gi.ucsc.edu%3A443
+
+- https://github.com/hamidghaedi/Methylation_Analysis

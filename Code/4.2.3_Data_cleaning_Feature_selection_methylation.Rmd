@@ -1,0 +1,365 @@
+---
+title: "Feature_selection_methylation"
+author: "luojingwen"
+date: "2025-06-21"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    extra_dependencies: ["ctex"]
+header-includes:
+  - \usepackage{ctex}
+lang: en
+editor_options: 
+  chunk_output_type: inline
+---
+
+#library
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+options(stringsAsFactors = F)
+
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(VennDiagram)
+library(purrr)
+library(sva)
+library(gridExtra)
+library(ggplot2)
+library(RColorBrewer)
+
+```
+
+## load data
+
+```{r}
+methGBM <- read.table(gzfile("../data/preprocessed_TCGA/TCGA_GBM_mval_methylation.tsv.gz"), sep = "\t", header = TRUE) 
+colnames(methGBM) <- gsub("\\.", "-", colnames(methGBM))
+methLGG <- read.table(gzfile("../data/preprocessed_TCGA/TCGA_LGG_mval_methylation.tsv.gz"), sep = "\t", header = TRUE) 
+colnames(methLGG) <- gsub("\\.", "-", colnames(methLGG))
+batch_info <- read.table("../data/preprocessed_TCGA/TCGA_GBM_batch_methylation.csv", sep = ",", header = TRUE) 
+
+outpath = "../result/feature_selection/"
+```
+
+## split data
+```{r}
+samples_GBM <- colnames(methGBM)
+samples_GBM <- gsub("\\.", "-", samples_GBM)
+
+samples_LGG <- colnames(methLGG)
+samples_LGG <- gsub("\\.", "-", samples_LGG)
+
+
+meta_GBM <- read.table(gzfile("../data/GBM_data_information.csv"), sep = ",", header = TRUE) %>% filter(sample %in%samples_GBM) %>% mutate(suffix=case_when(data_set_information=="Train"~"train",
+                                                                                                                                                            data_set_information=="Validation"~"val",
+                                                                                                                                                            data_set_information=="External Test"~"external_test",
+                                                                                                                                                            data_set_information=="Internal Test"~"internal_test"))
+rownames(meta_GBM) <- meta_GBM$X
+meta_GBM$X <- NULL
+
+meta_LGG <- read.table(gzfile("../data/LGG_data_information.csv"), sep = ",", header = TRUE) %>% filter(sample %in%samples_LGG)%>%  mutate(suffix=case_when(data_set_information=="Train"~"train",
+                                                                                                                                                            data_set_information=="Validation"~"val",
+                                                                                                                                                            data_set_information=="External Test"~"external_test",
+                                                                                                                                                            data_set_information=="Internal Test"~"internal_test"))
+rownames(meta_LGG) <- meta_LGG$X
+meta_LGG$X <- NULL
+
+methGBM_split <- list()
+
+for (set in unique(meta_GBM$data_set_information)) {
+  suffix <- meta_GBM %>% filter(data_set_information==set) %>% pull(suffix) %>% unique()
+  samples <- meta_GBM %>%
+    filter(data_set_information == set) %>%
+    pull(sample)
+  
+  valid_samples <- intersect(samples, colnames(methGBM))
+
+  if (length(valid_samples) == 0) {
+    warning(paste("No valid samples found for set", set))
+    next
+  }
+
+  methGBM_split[[set]] <- methGBM[, valid_samples, drop = FALSE]
+  methGBM[, valid_samples, drop = FALSE] %>% write.table(paste0(outpath,"TCGA_GBM_mval_methylation_",suffix,".csv"),sep=",",col.names = T,row.names =T,quote = F)
+  message("Subset for ", set, ": ", length(valid_samples), " samples")
+}
+
+methLGG_split <- list()
+
+for (set in unique(meta_LGG$data_set_information)) {
+  suffix <- meta_LGG %>% filter(data_set_information==set) %>% pull(suffix) %>% unique()
+  samples <- meta_LGG %>%
+    filter(data_set_information == set) %>%
+    pull(sample)
+  
+  valid_samples <- intersect(samples, colnames(methLGG))
+
+  if (length(valid_samples) == 0) {
+    warning(paste("No valid samples found for set", set))
+    next
+  }
+
+  methLGG_split[[set]] <- methLGG[, valid_samples, drop = FALSE]
+  methLGG[, valid_samples, drop = FALSE] %>% write.table(paste0(outpath,"TCGA_LGG_mval_methylation_",suffix,".csv"),sep=",",col.names = T,row.names =T,quote = F)
+  message("Subset for ", set, ": ", length(valid_samples), " samples")
+}
+
+```
+
+## Feature Selection
+```{r}
+## After Batch correction
+train_GBM <- read.table(gzfile("../result/feature_selection/TCGA_GBM_mval_methylation_train.csv"), sep = ",", header = TRUE) 
+
+train_LGG <- read.table(gzfile("../result/feature_selection/TCGA_LGG_mval_methylation_train.csv"), sep = ",", header = TRUE) 
+
+```
+
+### Find DMC
+```{r}
+library(limma)
+
+common_probes <- intersect(rownames(train_GBM), rownames(train_LGG))
+gbm_mat <- train_GBM[common_probes, ]
+lgg_mat <- train_LGG[common_probes, ]
+
+expr_mat <- cbind(gbm_mat, lgg_mat)
+group <- factor(c(rep("GBM", ncol(gbm_mat)), rep("LGG", ncol(lgg_mat))))
+
+
+design <- model.matrix(~ group)
+fit <- lmFit(expr_mat, design)
+fit <- eBayes(fit)
+
+# Find DMP
+topTable_res <- topTable(fit, coef = 2, number = Inf, adjust = "BH")
+
+head(topTable_res)
+write.csv(topTable_res, file = "../result/limma_DMP_GBM_vs_LGG.csv")
+
+```
+#### visulaization
+```{r}
+topTable_res$direction <- "Not"
+topTable_res$direction[topTable_res$adj.P.Val < 0.05 & topTable_res$logFC > 0] <- "Hyper"
+topTable_res$direction[topTable_res$adj.P.Val < 0.05 & topTable_res$logFC < 0] <- "Hypo"
+
+table(topTable_res$direction)
+n_hyper <- sum(topTable_res$direction == "Hyper")
+n_hypo <- sum(topTable_res$direction == "Hypo")
+
+
+cols <- c("Hyper" = "red", "Hypo" = "blue", "Not" = "grey")
+
+ggplot(topTable_res, aes(x = logFC, y = -log10(adj.P.Val), color = direction)) +
+  geom_point(alpha = 0.6, size = 1.2) +
+  scale_colour_manual(values = cols) +
+  geom_vline(xintercept = c(-0.4, 0.4), colour = "#990000", linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), colour = "black", linetype = "dashed") +
+  theme_bw() +
+  xlab("Fold Change") +
+  ylab("-log10 adj. P value") +
+  theme(legend.position = "right") +
+  annotate("text", x = 4, y = max(-log10(topTable_res$adj.P.Val), na.rm = TRUE) * 0.9,
+           label = paste0("Hypermethylated: ", n_hyper),
+           color = "red", hjust = 1) +
+  annotate("text", x = -4, y = max(-log10(topTable_res$adj.P.Val), na.rm = TRUE) * 0.9,
+           label = paste0("Hypomethylated: ", n_hypo),
+           color = "blue", hjust = 0)
+
+```
+### Find DMR
+```{r}
+library(DMRcate)
+library(limma)
+library(GenomicRanges)
+
+refpath = "../data/reference/"
+
+# check probe alignment
+common_probes <- intersect(rownames(train_GBM), rownames(train_LGG))
+mval_mat <- as.matrix(cbind(train_GBM[common_probes, ], train_LGG[common_probes, ]))
+
+group <- factor(c(rep("GBM", ncol(train_GBM)), rep("LGG", ncol(train_LGG))))
+design <- model.matrix(~ group)
+
+manifest <- fread(paste0(refpath,"HM450.hg38.manifest.gencode.v36.tsv.gz"), header = TRUE, data.table = FALSE)
+
+my_annot <- cpg.annotate(
+  datatype = "array",
+  object = mval_mat,
+  what = "M",
+  arraytype = "450K", 
+  analysis.type = "differential",
+  design = design,
+  coef = 2,  # group LGG vs GBM
+  annotation = manifest
+)
+
+## probe's distance over 500 will not group to DMR
+## at least 2 probes should be in a DMR
+dmr_result <- dmrcate(my_annot, lambda = 500, C = 2)
+
+dmrs <- extractRanges(dmr_result, genome = "hg38")
+
+head(dmrs)
+```
+
+#### visulization
+
+```{r}
+dmr_df <- as.data.frame(dmrs)
+
+dmr_volcano <- dmr_df[, c("seqnames", "start", "end", "no.cpgs", "meandiff", "Stouffer", "maxdiff", "HMFDR")]
+colnames(dmr_volcano) <- c("chr", "start", "end", "CpGs", "logFC", "Z", "maxDiff", "adj.P.Val")
+
+
+dmr_volcano$significant <- ifelse(
+  dmr_volcano$adj.P.Val < 0.05 & abs(dmr_volcano$logFC) > 0,
+  ifelse(dmr_volcano$logFC > 0, "Hypermethylated", "Hypomethylated"),
+  "Not Sig"
+)
+
+dmr_counts <- table(dmr_volcano$significant)
+
+ggplot(dmr_volcano, aes(x = logFC, y = -log10(adj.P.Val), color = significant)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  scale_color_manual(
+    values = c(
+      "Hypermethylated" = "red",
+      "Hypomethylated" = "blue",
+      "Not Sig" = "grey"
+    )
+  ) +
+  geom_vline(xintercept = c(-0.05, 0.05), linetype = "dashed", color = "black") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +
+  labs(
+    title = "Volcano Plot of Differentially Methylated Regions (DMRs)",
+    x = "Mean Methylation Difference",
+    y = "-log10 Adjusted P-Value"
+  ) +
+  annotate("text", x = max(dmr_volcano$logFC, na.rm = TRUE), y = max(-log10(dmr_volcano$adj.P.Val), na.rm = TRUE),
+           label = paste0("Hyper: ", dmr_counts["Hypermethylated"]), hjust = 1.1, vjust = 1.5, color = "red", size = 5) +
+  annotate("text", x = min(dmr_volcano$logFC, na.rm = TRUE), y = max(-log10(dmr_volcano$adj.P.Val), na.rm = TRUE),
+           label = paste0("Hypo: ", dmr_counts["Hypomethylated"]), hjust = -0.1, vjust = 1.5, color = "blue", size = 5) +
+  theme_bw() +
+  theme(legend.title = element_blank())
+```
+
+### Generate final matrix
+```{r}
+## output
+dmr_output = dmr_volcano %>% arrange(chr, start) %>% mutate(position=paste0("chr:",start,"-",end), label=paste0("DMR",row_number()))
+
+dmr_output %>%  write.csv(file = "../result/DMR_GBM_vs_LGG.csv")
+```
+
+
+## Feature mapping
+### ENSG - genename mappinng
+```{r}
+library(rtracklayer)
+
+gtf <- rtracklayer::import("../data/reference/gencode.v36.annotation.gtf.gz")
+gene_anno <- gtf[gtf$type == "gene"]
+
+gene_map <- gene_anno %>%
+  as.data.frame() %>%
+  select(gene_id, gene_name) %>%
+  distinct()
+
+head(gene_map)
+
+```
+### Probe - ENSG
+```{r}
+manifest_27 <- fread(paste0(refpath,"HM27.hg38.manifest.gencode.v36.tsv.gz"), header = TRUE, data.table = FALSE)
+
+probe_to_gene <- manifest_27 %>%
+  select(probeID, genesUniq) %>%
+  filter(!is.na(genesUniq)) %>%
+  separate_rows(genesUniq, sep = ";") %>%
+  distinct()
+colnames(probe_to_gene) <- c("probeID","gene_name")
+
+probe_to_esemble <-probe_to_gene %>% merge(gene_map)
+head(probe_to_esemble)
+```
+### Read file
+```{r}
+GBM_train <- read.csv("../data/preprocessed_TCGA/GBM_methylation_450_27_batch_corrected_train.csv")
+GBM_val <- read.csv("../data/preprocessed_TCGA/GBM_methylation_450_27_batch_corrected_val.csv")
+GBM_internal <- read.csv("../data/preprocessed_TCGA/GBM_methylation_450_27_batch_corrected_internal_test.csv")
+GBM_external <- read.csv("../data/preprocessed_TCGA/GBM_methylation_450_27_batch_corrected_external_test.csv")
+
+LGG_train <- read.csv("../data/preprocessed_TCGA/GBM_methylation_450_27_batch_corrected_train.csv")
+LGG_val <- read.csv("../data/preprocessed_TCGA/GBM_methylation_450_27_batch_corrected_val.csv")
+LGG_internal <- read.csv("../data/preprocessed_TCGA/GBM_methylation_450_27_batch_corrected_internal_test.csv")
+LGG_external <- read.csv("../data/preprocessed_TCGA/GBM_methylation_450_27_batch_corrected_external_test.csv")
+
+
+```
+
+### convert to Ensembl gene × sample matrix
+```{r}
+convert_methylation_to_ensembl_matrix <- function(meth_df, probe_to_esemble) {
+
+  colnames(meth_df)[1] <- "probeID"
+  
+  # Step 1: merge methylation matrix and probe-to-gene mapping
+  meth_annot <- inner_join(meth_df, probe_to_esemble, by = "probeID")
+  
+  # Step 2: reshape to long format（probe, sample, methylation, gene_id）
+  meth_long <- meth_annot %>%
+    pivot_longer(cols = -c(probeID,gene_name, gene_id), names_to = "sample", values_to = "methylation")
+  
+  # Step 3: calculate average methylation level on genes
+  gene_sample_matrix <- meth_long %>%
+    group_by(gene_id, sample) %>%
+    summarise(mean_methylation = mean(methylation, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(names_from = sample, values_from = mean_methylation)
+  
+  # Step 4: set gene_id to index name
+  result_mat <- as.data.frame(gene_sample_matrix)
+  rownames(result_mat) <- result_mat$gene_id
+  result_mat <- result_mat[, -1]
+
+  # return Ensembl gene × sample matrix
+  return(result_mat)
+}
+```
+
+```{r}
+GBM_train_mat <- convert_methylation_to_ensembl_matrix(GBM_train, probe_to_esemble)
+GBM_val_mat <- convert_methylation_to_ensembl_matrix(GBM_val,probe_to_esemble)
+GBM_internal_mat <- convert_methylation_to_ensembl_matrix(GBM_internal,probe_to_esemble)
+GBM_external_mat <- convert_methylation_to_ensembl_matrix(GBM_external,probe_to_esemble)
+
+LGG_train_mat <- convert_methylation_to_ensembl_matrix(LGG_train,probe_to_esemble)
+LGG_val_mat <- convert_methylation_to_ensembl_matrix(LGG_val,probe_to_esemble)
+LGG_internal_mat <- convert_methylation_to_ensembl_matrix(LGG_internal,probe_to_esemble)
+LGG_external_mat <- convert_methylation_to_ensembl_matrix(LGG_external,probe_to_esemble)
+```
+
+### save file
+```{r}
+outpath = "../data/preprocessed_TCGA/"
+GBM_train_mat %>% write.table(paste0(outpath,"/GBM_methylation_450_27_batch_corrected_ensembl_train.csv"),sep="\t",col.names = T,row.names =T,quote = F)
+
+GBM_val_mat %>% write.table(paste0(outpath,"/GBM_methylation_450_27_batch_corrected_ensembl_val.csv"),sep="\t",col.names = T,row.names =T,quote = F)
+
+GBM_internal_mat%>% write.table(paste0(outpath,"/GBM_methylation_450_27_batch_corrected_ensembl_internal_test.csv"),sep="\t",col.names = T,row.names =T,quote = F)
+
+GBM_external_mat %>% write.table(paste0(outpath,"/GBM_methylation_450_27_batch_corrected_ensembl_external_test.csv"),sep="\t",col.names = T,row.names =T,quote = F)
+
+LGG_train_mat %>% write.table(paste0(outpath,"/LGG_methylation_450_27_batch_corrected_ensembl_train.csv"),sep="\t",col.names = T,row.names =T,quote = F)
+
+LGG_val_mat %>% write.table(paste0(outpath,"/LGG_methylation_450_27_batch_corrected_ensembl_val.csv"),sep="\t",col.names = T,row.names =T,quote = F)
+
+LGG_internal_mat %>% write.table(paste0(outpath,"/LGG_methylation_450_27_batch_corrected_ensembl_internal_test.csv"),sep="\t",col.names = T,row.names =T,quote = F)
+
+LGG_external_mat %>% write.table(paste0(outpath,"/LGG_methylation_450_27_batch_corrected_ensembl_external_test.csv"),sep="\t",col.names = T,row.names =T,quote = F)
+```

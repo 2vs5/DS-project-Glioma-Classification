@@ -1,0 +1,629 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+R.version # version 4.5.1
+```
+
+# Install libraries
+
+```{r, warning=FALSE}
+# install.packages("ggpubr")
+# install.packages("GGally")
+```
+
+# Load libraries
+
+```{r, warning=FALSE}
+library(ggplot2)
+library(ggpubr)
+library(MOFA2)
+library(GGally)
+library(data.table)
+library(purrr)
+library(cowplot)
+library(dplyr)
+library(tidyr)
+library(forcats)
+```
+
+# Load the model
+
+```{r, warning=FALSE}
+# Set the working directory as where this R file is located
+setwd("C:/Users/gyeon/Desktop/FU/02_SoSe25/DSLS/group_project/MOFA")
+getwd()
+
+# Load the model
+model <- load_model("input/trained_model_factor_30mixed.hdf5")
+```
+
+## Data exploration
+
+```{r, warning=FALSE}
+Z <- model@expectations$Z$single_group # 605 samples, 30 factors
+# summary(Z)
+```
+
+# Add metadata to the model
+
+```{r, warning=FALSE}
+###################################################################################
+# Create the sample data.frame.
+###################################################################################
+
+# Get the sample IDs in the model
+# Another column is "group". 
+# People usually use it for the cell-type annotation during single cell analysis. 
+# So, not necessary in this case, b.c. no group info
+model_id_map <- data.frame(sample = model@samples_metadata[["sample"]])
+# > e.g. TCGA-02-0001-01c
+
+# Extract the first 3 parts from each model sample ID to match the clinical IDs
+extract_bcr_barcode <- function(full_id) {
+  parts <- strsplit(full_id, "-", fixed = TRUE)[[1]]
+  paste(parts[1:3], collapse = "-") # e.g., "TCGA-CS-4943"
+}
+
+# Apply the extraction to all model sample IDs
+model_id_map$bcr_patient_barcode <- sapply(model_id_map$sample, 
+                                           extract_bcr_barcode)
+
+###################################################################################
+# Create the clinical data.frame and join it with the sample data.frame
+###################################################################################
+
+# Load the clinical metadata of samples
+GBM_clinical <- read.csv("input/TCGA-GBM_clinicalXML_patient.csv")
+LGG_clinical <- read.csv("input/TCGA-LGG_clinicalXML_patient.csv")
+
+# Combine two clinical datasets with columns of interest
+clinical_data <- rbind(GBM_clinical[c("bcr_patient_barcode", 
+                                      "gender", "race_list")],
+                       LGG_clinical[c("bcr_patient_barcode", 
+                                      "gender", "race_list")])
+
+# Join the clinical data to the model sample IDs based on bcr_patient_barcode
+metadata <- left_join(model_id_map,
+                      clinical_data,
+                      by = "bcr_patient_barcode") # 650 samples
+
+###################################################################################
+# Create the cluster result data.frame and join it with the merged data.frame
+###################################################################################
+
+# Load the clustering result of samples
+clutering_method <- "kmeans_30mixed" # Need to change depending on the method
+cut_method = "complete" # available options: average, complete, single, spectral
+
+cluster_res_2 <- read.csv(paste("input/", clutering_method, 
+                                "/k_2/train_cluster_labels_consensus_",
+                                cut_method, ".csv",
+                                sep = ""))
+cluster_res_3 <- read.csv(paste("input/", clutering_method, 
+                                "/k_3/train_cluster_labels_consensus_",
+                                cut_method, ".csv",
+                                sep = ""))
+cluster_res_4 <- read.csv(paste("input/", clutering_method, 
+                                "/k_4/train_cluster_labels_consensus_",
+                                cut_method, ".csv",
+                                sep = ""))
+cluster_res_5 <- read.csv(paste("input/", clutering_method, 
+                                "/k_5/train_cluster_labels_consensus_",
+                                cut_method, ".csv",
+                                sep = ""))
+
+# Join the clustering result data.frames based on sample and label columns
+cluster_res <- Reduce(function(x, y) merge(x, y, by = c("sample", "label")), 
+                      list(cluster_res_2, cluster_res_3, cluster_res_4, cluster_res_5)) # 605 samples
+colnames(cluster_res) <- c("sample", "label", "k=2", "k=3", "k=4", "k=5")
+rm(cluster_res_2, cluster_res_3, cluster_res_4, cluster_res_5) # Remove the intermediates
+
+# Join the clinical data to the model sample IDs based on bcr_patient_barcode
+metadata <- left_join(metadata,
+                      cluster_res,
+                      by = "sample")
+
+###################################################################################
+# Change the structure of the merged_metadata
+###################################################################################
+
+# Change the column name: race_list -> race
+colnames(metadata)[4] <- "race"
+colnames(metadata)
+
+# Convert the data type to factor
+print(str(metadata))
+cols_to_factor <- c(1:9)
+metadata[cols_to_factor] <- lapply(metadata[cols_to_factor], factor)
+print(str(metadata))
+
+###################################################################################
+# Update the samples_metadata
+###################################################################################
+
+samples_metadata(model) <- metadata
+```
+
+```{r, warning=FALSE}
+print(head(samples_metadata(model), n=5))
+print(summary(metadata[c(6,7,8,9)]))
+```
+
+# Identify discriminative factors across clusters
+
+The aim is to figure out which factors are statistically significant for differentiating a cluster.
+
+## Check the assumptions for t-test
+
+First of all, we attempted to check the **normality**. If you look at the results from the below snippet, we applied the **Shapiro-Wilk test** on the values of each factor for each cluster. Only 4 of 90 cases --- factors 8 for cluster 0, factors 11 for cluster 1 and factors 8 & 11 for cluster 2 --- had a p-value larger than 0.05. This means that **most of the cases showed that the data does not follow a normal distribution.** For this reason, we decided to use the **Wilcoxon rank-sum test** as a safer option to compare clusters pair by pair.
+
+We did not check **equal variances** among clusters, because the normality was not satisfied.
+
+```{r, warning=FALSE}
+# k=3
+sample_3_0 <- metadata$sample[metadata[["k=3"]] %in% c("0")]
+sample_3_1 <- metadata$sample[metadata[["k=3"]] %in% c("1")]
+sample_3_2 <- metadata$sample[metadata[["k=3"]] %in% c("2")]
+length(sample_3_0) # 147
+length(sample_3_1) # 150
+length(sample_3_2) # 308
+
+# Variable to save p-vals for p-value distribution
+pvals <- data.frame(cluster = rep(NA,90),
+                    pval = rep(NA,90))
+
+# Normality check
+# cluter 0
+for (i in 1:30) {
+  shapiro <- shapiro.test(Z[sample_3_0,i])
+  pvals$cluster[i] <- 0
+  pvals$pval[i] <- shapiro$p.value
+  if (shapiro$p.value > 0.05) {
+    print(paste("For Factor ", i, " of the cluster 0, p-value is ", 
+                shapiro$p.value, sep = ""))
+    
+  }
+  # qqnorm(Z[sample_3_0,i])
+  # qqline(Z[sample_3_0,i])
+  # > The Q-Q plots showed major tail distortion (violate normality)
+}
+# cluster 1
+for (i in 1:30) {
+  shapiro <- shapiro.test(Z[sample_3_1,i])
+  pvals$cluster[i+30] <- 0
+  pvals$pval[i+30] <- shapiro$p.value
+  if (shapiro$p.value > 0.05)
+    print(paste("For Factor ", i, " of the cluster 1, p-value is ", 
+                shapiro$p.value, sep = ""))
+}
+# cluster 2
+for (i in 1:30) {
+  shapiro <- shapiro.test(Z[sample_3_2,i])
+  pvals$cluster[i+60] <- 0
+  pvals$pval[i+60] <- shapiro$p.value
+  if (shapiro$p.value > 0.05)
+    print(paste("For Factor ", i, " of the cluster 2, p-value is ", 
+                shapiro$p.value, sep = ""))
+}
+```
+
+### P-value distribution of multiple testing
+
+```{r, warning=FALSE}
+ggplot(pvals, aes(x = pvals$pval)) +
+  geom_histogram(aes(y = ..density..), binwidth = 0.01, fill = "lightblue", 
+                 colour = "lightblue", alpha = 0.7) +
+  labs(
+    title = "Shapiro-Wilk p-value distribution across cases",
+    x = "p-values",
+    y = "Density"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+## Visualisation of factors one at a time
+
+```{r, warning=FALSE}
+?stat_compare_means
+
+# k_list <- c("k=2", "k=3", "k=4", "k=5")
+k_list <- c("k=3")
+# k_list <- c("race", "gender", "label")
+
+for (k in k_list) {
+  p <- plot_factor(
+    model,
+    # factors = 1:30, # to filter out non-significant factors
+    # factors = c(1,2,3,6,8,9,11,16,25,28), # to check factors for annotation of each cluster
+    # factors = c(8,9), # Cluster 0
+    factors = c(1,2,3,6,11,16,25,28), # Cluster 2
+    # factors = c(1,2,6,11,16,25,28), # Cluster 2 w/o factor 3
+    # color_by = "label",
+    color_by = k,
+    group_by = k,
+    dot_size = 1,
+    dodge = TRUE, # dodge points with different colors
+    legend = TRUE,
+    add_violin = TRUE,
+    violin_alpha = 0.25 # transparency of violin plots
+  )
+
+  # Add pairwise p-values
+  # ns: p>0.05, *:p<=0.05, **: p<=0.01, ***: p<=0.001, ****: p<=0.0001
+  p <- p + stat_compare_means(
+    aes_string(group = k),
+    comparisons = combn(
+      levels(factor(samples_metadata(model)[[k]])), 2, simplify = FALSE),
+    method = "wilcox.test", 
+    label = "p.signif",
+    # label = "p.format",
+    hide.ns = TRUE,
+    p.adjust.methods = "BH" # exploratory, group-level comparisons
+  )
+  
+  print(p)
+}
+```
+
+## Visualisation of combinations of factors
+
+```{r, warning=FALSE}
+plot_factors(model, 
+  factors = c(1,2,3,7,16,25,27,28), # for cluster 0
+  # factors = c(8,9), # for cluster 2
+  color_by = "k=3"
+)
+```
+
+# Feature mapping
+
+The aim is to map the feature space of the model's inputs to align with that of functional annotation databases, specifically MSigDB, which uses ENSG gene identifiers, to enable gene set enrichment analysis (GSEA) on factors.
+
+For your information, each **factor** is associated with a **set of feature loadings** in each modality. These loadings indicate **how strongly each feature** (e.g. gene, protein, CpG site) **contributes** to that factor.
+
+## Load metadata
+
+```{r, warning=FALSE}
+probe_gene <- read.csv("input/gene_name_mapping/chromosome_probe_gene.csv")
+```
+
+## Add the column of trimmed probe ID
+
+```{r, warning=FALSE}
+probe_gene$Probe_ID_trimmed <- sub("\\..*", "", probe_gene$Probe_ID)
+head(probe_gene)
+```
+
+## Transform the feature names of model
+
+### CNV
+
+```{r, warning=FALSE}
+print(head(features_names(model)$CNV)) # before
+# sub("\\..*", "", features_names(model)$CNV)[1:3]
+features_names(model)[["CNV"]] <- sub("\\..*", "", features_names(model)$CNV)
+print(head(features_names(model)$CNV)) # after
+```
+
+### Methylation
+
+```{r, warning=FALSE}
+print(head(features_names(model)$Methylation)) # before
+# sub("\\..*", "", features_names(model)$Methylation)[1:3]
+features_names(model)[["Methylation"]] <- sub("\\..*", "", 
+                                              features_names(model)$Methylation)
+print(head(features_names(model)$Methylation)) # after
+```
+
+### RNAseq
+
+```{r, warning=FALSE}
+print(head(features_names(model)$RNAseq)) # before
+# sub("\\..*", "", features_names(model)$RNAseq)[1:3]
+features_names(model)[["RNAseq"]] <- sub("\\..*", "", features_names(model)$RNAseq)
+print(head(features_names(model)$RNAseq)) # after
+```
+
+### Protein
+
+```{r, warning=FALSE}
+print(head(features_names(model)$Protein)) # before
+# print(sub("_.*", "", features_names(model)$Protein)[1:3])
+# length(features_names(model)$Protein) # 366
+
+protein_df <- data.frame(Gene_Symbol = sub("_.*", "", 
+                                           features_names(model)$Protein))
+protein_df <- left_join(protein_df,
+                        probe_gene[c("Gene_Symbol", "Probe_ID_trimmed")],
+                        by = "Gene_Symbol")
+
+# Check if there are any genes which were unmapped or mapped to multiple IDs
+table(is.na(protein_df$Probe_ID_trimmed)) # FALSE 366
+
+# Update the features_names
+features_names(model)[["Protein"]] <- protein_df$Probe_ID_trimmed
+print(head(features_names(model)$Protein)) # after
+```
+
+### SNV
+
+```{r initial version, warning=FALSE}
+###################################################################################
+# NO NEED TO IMPLEMENT; REVISED VER. IS BELOW
+###################################################################################
+
+# print(features_names(model)$SNV[1:5]) 
+# # "A1BG"  "A1CF"  "A2M"   "A2ML1" "AAAS"
+# 
+# # length(features_names(model)$SNV) # 10008
+# SNV_df <- data.frame(Gene_Symbol = sub("_.*", "", features_names(model)$SNV))
+# 
+# mapped_SNV_df <- left_join(SNV_df,
+#                            probe_gene[c("Gene_Symbol", "Probe_ID_trimmed")],
+#                            by = "Gene_Symbol")
+# # >> the number of features = 10014
+# 
+# # Check the relationship between gene symbols and Ensemble IDs
+# length(unique(probe_gene$Gene_Symbol)) # 59427 (# lines = 60660)
+# length(unique(probe_gene$Probe_ID_trimmed)) # 60616 (# lines = 60660)
+# 
+# # Count how many times each gene symbol is mapped to an Ensembl ID
+# mapping_counts <- mapped_SNV_df %>%
+#   count(Gene_Symbol, name = "mapping_count")  # count mappings per gene symbol
+```
+
+In this case, **six genes (*ACTL10, CCDC39, ELFN2, MATR3, PDE11A, ZNF883*)** were respectively mapped to two Ensemble gene IDs. This resulted in a different dimensionality of feature space from the one of the trained model. The original number of features in the SNV layer was 10,008, and only about **0.06%** of genes caused the dimensionality issue. **For this reason, we decided to map one gene to one Ensemble id because the risk of losing information is quite low.**
+
+```{r revised version, warning=FALSE}
+print(head(features_names(model)$SNV)) # before
+
+# Extract gene symbol from MOFA+ SNV feature names
+SNV_df <- data.frame(Gene_Symbol = sub("_.*", "", features_names(model)$SNV))
+
+# Keep only the first mapping for each Gene_Symbol (force 1:1)
+probe_gene_unique <- probe_gene[c("Gene_Symbol", "Probe_ID_trimmed")] %>%
+  filter(!is.na(Probe_ID_trimmed)) %>%
+  distinct(Gene_Symbol, .keep_all = TRUE)
+
+# Join with original SNV_df (1:1 enforced), length will stay 10008
+mapped_SNV_df <- left_join(SNV_df, probe_gene_unique, by = "Gene_Symbol")
+
+# table(is.na(mapped_SNV_df$Probe_ID_trimmed)) # FALSE 10007 TRUE 1
+# print(mapped_SNV_df$Gene_Symbol[is.na(mapped_SNV_df$Probe_ID_trimmed)])
+# >> Gene name is Unknown, which means mapping is unavailable.
+# Fill up the NA value as "Unknown"
+mapped_SNV_df$Probe_ID_trimmed[is.na(mapped_SNV_df$Probe_ID_trimmed)] <- "Unknown"
+
+# Update the features_names
+features_names(model)[["SNV"]] <- mapped_SNV_df$Probe_ID_trimmed
+
+print(head(features_names(model)$SNV)) # after
+```
+
+# Visualisation of feature weights
+
+```{r, warning=FALSE}
+###################################################################################
+# NO NEED TO IMPLEMENT; PLOTS HAVE ROOM FOR IMPROVEMENT
+###################################################################################
+for (layer in c("CNV", "Methylation", "RNAseq", "Protein", "SNV")){
+  p <- plot_weights(model,
+  view = layer,
+  factor = 1,
+  nfeatures = 10,     # Number of features to highlight
+  scale = TRUE,          # Scale weights from -1 to 1
+  abs = FALSE             # Take the absolute value?
+  )
+  print(p)
+}
+```
+
+```{r, warning=FALSE}
+for (layer in c("CNV", "Methylation", "RNAseq", "Protein", "SNV")){
+  p <- plot_top_weights(model,
+  view = layer,
+  factor = 1,
+  nfeatures = 10,
+  )
+  print(p)
+}
+```
+
+# GSEA on factors
+
+The below snippet was implemented to check the gene space of *MSigDB_v6.0_c2_mouse* used in the tutorial.
+
+```{r, warning=FALSE}
+# load("input/MSigDB_v6.0_C5_mouse.RData")
+# colnames(MSigDB_v6.0_C5_mouse)[1:5]
+# rm(MSigDB_v6.0_C5_mouse)
+```
+
+**We need to match the gene names in the MOFA object to the ones in the gene set annotation.**
+
+## Load databases
+
+```{r, warning=FALSE}
+# C2: curated gene sets from online pathway databases, publications in PubMed, and knowledge of domain experts.
+load("input/MSigDB_v6.0_C2_human.RData")
+
+# C5: extracted from the Gene Ontology data.base
+load("input/MSigDB_v6.0_C5_human.RData")
+```
+
+```{r, warning=FALSE}
+print(head(rownames(MSigDB_v6.0_C2_human), n=3))
+print(head(colnames(MSigDB_v6.0_C2_human), n=3))
+
+print(head(rownames(MSigDB_v6.0_C5_human), n=3))
+print(head(colnames(MSigDB_v6.0_C5_human), n=3))
+```
+
+## Check variance explained
+
+### Total variance explained per view
+
+```{r, warning=FALSE}
+head(get_variance_explained(model)$r2_total[[1]])
+```
+
+## Run enrichment analysis
+
+```{r, warning=FALSE}
+?run_enrichment
+
+enrichment <- list()
+view_list <- c("CNV", "Methylation", "Protein", "RNAseq", "SNV")
+alpha_val = 0.05
+
+# Pathway DB: MSigDB_v6.0_C2_human
+for (view in view_list) {
+  case_name <- paste(view, "_pathway", sep = "")
+  enrichment[[case_name]] <- run_enrichment(
+    model,
+    view = view,
+    factors = 1:30,
+    feature.sets = MSigDB_v6.0_C2_human,
+    sign = "all",
+    statistical.test = "parametric",
+    p.adj.method = "BH",
+    alpha = alpha_val
+  )
+}
+
+# GO term DB: MSigDB_v6.0_C5_human
+for (view in view_list) {
+  case_name <- paste(view, "_GO", sep = "")
+  enrichment[[case_name]] <- run_enrichment(
+    model,
+    view = view,
+    factors = 1:30,
+    feature.sets = MSigDB_v6.0_C5_human,
+    sign = "all",
+    statistical.test = "parametric",
+    p.adj.method = "BH",
+    alpha = alpha_val
+  )
+}
+```
+
+## Extract top enriched terms per factor across omics layers
+
+```{r, warning=FALSE}
+# Prepare an empty list to store enrichment results per factor
+factorwise_results <- list()
+
+# Loop over each omics layer in the enrichment list
+for (omics in names(enrichment)) {
+  
+  # Extract adjusted p-value matrix (rows = terms, cols = factors)
+  pval_mat <- enrichment[[omics]]$pval.adj
+  
+  # Skip if pval.adj is missing or not a matrix
+  if (is.null(pval_mat) || !is.matrix(pval_mat)) next
+  
+  # Loop through each factor (i.e., column of the matrix)
+  for (f in seq_len(ncol(pval_mat))) {
+    factor_id <- colnames(pval_mat)[f]
+    
+    # Extract p-values for this factor
+    pvals <- pval_mat[, f]
+    
+    # Keep only significant terms (e.g., adj.p < 0.05 and not NA)
+    valid_idx <- which(!is.na(pvals) & pvals < 0.05)
+    if (length(valid_idx) == 0) next
+    
+    # Create a data frame with relevant information
+    df <- data.frame(
+      Factor     = factor_id,
+      OmicsLayer = omics,
+      Term       = rownames(pval_mat)[valid_idx],
+      AdjPval    = round(pvals[valid_idx], 4),
+      stringsAsFactors = FALSE
+    )
+    
+    # Save into the list with a unique key
+    factorwise_results[[paste(omics, factor_id, sep = "_")]] <- df
+  }
+}
+
+# Combine all the results into a single data frame
+final_df <- bind_rows(factorwise_results)
+```
+
+```{r, warning=FALSE}
+top_n_per_layer <- 3
+
+top_per_factor_layer <- final_df %>%
+  group_by(Factor, OmicsLayer) %>%
+  arrange(AdjPval, .by_group = TRUE) %>%
+  slice_head(n = top_n_per_layer) %>%
+  mutate(Omics = sub("_.*", "", OmicsLayer)) %>%
+  ungroup()
+```
+
+## Visualisation
+
+```{r, warning=FALSE}
+for (case in names(enrichment)){
+  plot_enrichment_heatmap(enrichment[[case]])
+}
+```
+
+```{r, warning=FALSE}
+?plot_enrichment
+
+case <- names(enrichment)
+plot_enrichment(enrichment[[case[1]]], factor = 2, alpha = 0.05, max.pathways = 3)
+```
+
+```{r, warning=FALSE}
+?plot_enrichment_detailed
+
+case <- names(enrichment)
+plot_enrichment_detailed(enrichment[[case[6]]], 
+                         factor = 2, 
+                         alpha = 0.05,
+                         max.genes = 5, 
+                         max.pathways = 3)
+```
+
+```{r, warning=FALSE}
+# To make sure that -log10(p.adj) is not equal to Inf
+min_pval <- min(top_per_factor_layer$AdjPval[top_per_factor_layer$AdjPval!=0])
+
+factor_list <- paste0("Factor", 1:30)
+for (factor_name in factor_list) {
+  # Calculate -log10(p.adj) and reorder by -log10(p.adj) DESC
+  plot_df <- top_per_factor_layer %>%
+    filter(Factor == factor_name) %>%
+    mutate(AdjPval = ifelse(AdjPval == 0, min_pval, AdjPval),  # replace 0s
+           logP = -log10(AdjPval)) %>%
+    arrange(AdjPval) %>%
+    mutate(Term = fct_reorder(Term, logP, .desc = FALSE))  # sort by ascending significance
+  
+  # Save the ggplot object
+  p <- ggplot(plot_df, aes(x = logP, y = Term)) +
+    geom_point(size = 3) +
+    geom_segment(aes(x = 0, xend = logP, y = Term, yend = Term), colour = "black") +
+    geom_vline(xintercept = -log10(0.05), linetype = "dashed") +
+    labs(
+      x = "-log10(adj p-value)",
+      y = "Enriched Pathway",
+      title = paste("Enriched pathways of", factor_name)
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(
+      axis.text.y = element_text(angle = 0, hjust = 1),
+      # plot.margin = margin(10, 10, 10, 40)
+    ) +
+    coord_cartesian(clip = "off")
+
+  # Explicitly print the plot
+  print(p)
+}
+```

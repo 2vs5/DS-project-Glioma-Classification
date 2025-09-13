@@ -1,0 +1,305 @@
+---
+title: "TCGA_preprocess_methylation"
+author: "luojingwen"
+date: "2025-06-19"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    extra_dependencies: ["ctex"]
+header-includes:
+  - \usepackage{ctex}
+lang: en
+editor_options: 
+  chunk_output_type: inline
+---
+
+#library
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+options(stringsAsFactors = F)
+
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(VennDiagram)
+library(purrr)
+library(sva)
+library(gridExtra)
+library(ggplot2)
+library(RColorBrewer)
+
+```
+
+## load data
+```{r}
+
+outpath = "../data/preprocessed_TCGA/"
+resultpath = "../result/preprocessing/"
+
+refpath = "../data/reference/"
+
+meth27 <- fread("../data/omics_Xena_GDC_TCGA/TCGA-GBM.methylation270.tsv.gz") %>% as.data.frame()
+meth450 <- fread("../data/omics_Xena_GDC_TCGA/TCGA-GBM.methylation450.filtered.tsv.gz") %>% as.data.frame()
+rownames(meth27) <- meth27[[1]]
+meth27 <- meth27[, -1]
+rownames(meth450) <- meth450[[1]]
+meth450 <- meth450[, -1]
+
+meth_LGG <- fread("../data/omics_Xena_GDC_TCGA/TCGA-LGG.methylation450.filtered.tsv.gz") %>% as.data.frame()
+rownames(meth_LGG) <- meth_LGG[[1]]
+meth_LGG <- meth_LGG[, -1]
+
+# read manifest 
+manifest <- fread("../data/omics_Xena_GDC_TCGA/HM450.hg38.manifest.gencode.v36.PROBEMAP", header = TRUE, data.table = FALSE)
+colnames(manifest) <- c("id", "gene", "chrom", "start", "end", "strand")
+# snp file
+snp_probe <- fread("../data/omics_Xena_GDC_TCGA/HM450.hg38.snp.tsv.gz") %>% as.data.frame()
+
+
+
+manifest_27 <- fread(paste0(refpath,"HM27.hg38.manifest.gencode.v36.tsv.gz"), header = TRUE, data.table = FALSE)
+manifest_450 <- fread(paste0(refpath,"HM450.hg38.manifest.gencode.v36.tsv.gz"), header = TRUE, data.table = FALSE)
+```
+
+
+## check probes overlap
+```{r}
+### extract probes with same postion 
+probe_overlap <- inner_join(manifest_27, manifest_450, 
+                            by = "probeID", suffix = c("_27", "_450"))
+
+probe_overlap$pos_match <- with(probe_overlap, 
+                                CpG_chrm_27 == CpG_chrm_450 &
+                                CpG_beg_27 == CpG_beg_450 &
+                                CpG_end_27 == CpG_end_450)
+
+
+table(probe_overlap$pos_match)
+
+consistent_probes <- probe_overlap %>% filter(pos_match) %>% pull(probeID)
+```
+
+### Venn plot
+```{r}
+probes_27 <- unique(manifest_27$probeID)
+probes_450 <- unique(manifest_450$probeID)
+
+probeID_overlap <- intersect(manifest_27$probeID, manifest_450$probeID)
+
+# 2. Name Overlap
+probe_overlap <- inner_join(manifest_27, manifest_450, by = "probeID", suffix = c("_27", "_450"))
+probe_overlap$pos_match <- with(probe_overlap, 
+                                CpG_chrm_27 == CpG_chrm_450 &
+                                CpG_beg_27 == CpG_beg_450 &
+                                CpG_end_27 == CpG_end_450)
+pos_match_probes <- probe_overlap %>% filter(pos_match) %>% pull(probeID)
+
+
+probe_overlap$anno_match <- with(probe_overlap, genesUniq_27 == genesUniq_450)
+anno_match_probes <- probe_overlap %>% filter(anno_match) %>% pull(probeID)
+
+venn_sets <- list(
+  "Probe 27K" = probes_27,
+  "Probe 450K" = probes_450,
+  "Probe Overlap" = probeID_overlap,
+  "Position Match" = pos_match_probes
+)
+
+# 
+venn.plot <- venn.diagram(
+  x = venn_sets,
+  filename = NULL,
+  fill = c("skyblue",  "pink","lightyellow","lightgreen"),
+  alpha = 0.5,
+  cex = 1.5,
+  cat.cex = 1.5,
+  cat.pos = c(5, -5, 0,20),
+  cat.dist = c(-0.3, -0.3, 0.1,0.1),
+  main = "Probe Overlap: ID vs Position vs Annotation"
+)
+
+grid.newpage()
+grid.draw(venn.plot)
+
+```
+### find probes in promoter region/ChrX/ChrY/ SNP
+```{r}
+### [-1500 bp, +500 bp]
+manifest_promoter <- manifest_450 %>%
+  filter(probeID %in% consistent_probes) %>% 
+  mutate(dist_vec = strsplit(as.character(distToTSS), ";")) %>%
+  rowwise() %>%
+  mutate(
+    dist_vec_num = list(as.numeric(dist_vec)),
+    is_promoter = any(dist_vec_num >= -1500 & dist_vec_num <= 500, na.rm = TRUE)
+  ) %>%
+  ungroup()
+```
+
+```{r}
+promoter_probes <- manifest_promoter %>%
+  filter(is_promoter) %>%
+  pull(probeID)
+```
+
+### find probes in ChrX/ChrY/SNP
+```{r}
+gender_probes <- manifest_promoter %>%
+  filter(CpG_chrm %in% c("chrX", "chrY")) %>% pull(probeID)
+
+snp_probes <- unique(snp_probe$Probe_ID)
+```
+
+### Venn plot
+```{r}
+snp_probes_27K <- intersect(snp_probes,manifest_27$probeID)
+
+venn_sets <- list(
+  "Before filtering" = consistent_probes,
+  "Gender-related" = gender_probes,
+  "SNP-related" = snp_probes_27K
+)
+
+# 
+venn.plot <- venn.diagram(
+  x = venn_sets,
+  filename = NULL,
+  fill = c(  "lightyellow","pink", "blue"),
+  alpha = 0.5,
+  cex = 1.5,
+  cat.cex = 1.5,
+  cat.pos = c(-150, 0, 150),
+  cat.dist = c(0.1, 0.12, 0.2)#,
+  #main = "Probe Filtering"
+)
+
+grid.newpage()
+grid.draw(venn.plot)
+```
+## methylation matrix - QC
+```{r}
+filter_snp_probes <- function(meth_df) {
+  n_before <- nrow(meth_df)
+  
+  # 0. Keep probes annotated to same genomic positions and in promoter region
+  meth_df <- meth_df[rownames(meth_df) %in% consistent_probes, , drop = FALSE]
+  n_1 <- nrow(meth_df)
+  
+  # 1. Keep probes with missing values in less than 10% of samples
+  meth_df <- meth_df[rowMeans(is.na(meth_df)) < 0.1, ]
+  n_2 <- nrow(meth_df)
+  
+  # 2. Remove probe from chrX, chrY
+  meth_df <- meth_df[!rownames(meth_df) %in% gender_probes, ]
+  n_3 <- nrow(meth_df)
+  
+  # 3. Remove probe related to snp
+  meth_filtered <- meth_df[!rownames(meth_df) %in% snp_probes, ]
+  n_after <- nrow(meth_filtered)
+  
+  cat(sprintf("Removed %d probes (%d(Before) -> %d(promoter) -> %d(rm NA) -> %d(rm gender) -> %d(rm snp)rows).\n",
+              n_before - n_after,  n_before, n_1, n_2, n_3, n_after))
+  return(meth_filtered)
+}
+# promoter
+meth27_filtered <- filter_snp_probes(meth_df =  meth27)
+meth450_filtered <- filter_snp_probes(meth_df =  meth450)
+meth_LGG_filtered <- filter_snp_probes(meth_df =  meth_LGG)
+
+```
+## convert beta values to m_values
+## m = log2(beta/1-beta)
+```{r}
+beta_to_mval <- function(beta, epsilon = 1e-6) {
+  beta[beta <= 0] <- epsilon
+  beta[beta >= 1] <- 1 - epsilon
+  log2(beta / (1 - beta))
+}
+
+meth27_mval <- beta_to_mval(meth27_filtered)
+meth450_mal <- beta_to_mval(meth450_filtered)
+meth_LGG <- beta_to_mval(meth_LGG_filtered)
+```
+
+## check sample overlap
+```{r}
+overlap_probes <- intersect(rownames(meth27_mval), rownames(meth450_mal))
+
+matrix_meth27 <- meth27_mval[overlap_probes, , drop = FALSE]
+matrix_meth450 <- meth450_mal[overlap_probes, , drop = FALSE]
+
+matrix_meth27 <- matrix_meth27[sort(rownames(matrix_meth27)), ]
+matrix_meth450 <- matrix_meth450[sort(rownames(matrix_meth450)), ]
+
+
+colnames(matrix_meth27) <- gsub("\\.", "-", colnames(matrix_meth27))
+colnames(matrix_meth450) <- gsub("\\.", "-", colnames(matrix_meth450))
+
+overlap_samples <- intersect(colnames(matrix_meth27), colnames(matrix_meth450))
+matrix_meth27_unique <- matrix_meth27[, !(colnames(matrix_meth27) %in% overlap_samples), drop = FALSE]
+
+stopifnot(identical(rownames(matrix_meth27_unique), rownames(matrix_meth450)))
+
+meth_GBM <- cbind(matrix_meth27_unique, matrix_meth450)
+
+samples_27 <- colnames(matrix_meth27_unique)
+samples_450 <- colnames(matrix_meth450)
+
+batch_info <- data.frame(
+  sample = c(samples_27, samples_450),
+  platform = c(rep("HM27", length(samples_27)), rep("HM450", length(samples_450)))
+)
+```
+### M-value distribution 
+```{r}
+library(ggplot2)
+library(reshape2)  # 或用 tidyr::pivot_longer
+
+# 添加来源信息 & 转为long格式
+meth_GBM_long <- melt(as.matrix(meth_GBM))
+colnames(meth_GBM_long) <- c("Probe", "Sample", "M_value")
+meth_GBM_long$Group <- "GBM"
+
+meth_LGG_long <- melt(as.matrix(meth_LGG))
+colnames(meth_LGG_long) <- c("Probe", "Sample", "M_value")
+meth_LGG_long$Group <- "LGG"
+
+# 合并数据
+df_long <- rbind(meth_GBM_long, meth_LGG_long)
+
+# 选一部分数据绘图（加速）
+set.seed(42)
+df_sample <- df_long[sample(nrow(df_long), min(50000, nrow(df_long))), ]
+
+# 绘图
+ggplot(df_sample, aes(x = M_value, fill = Group, color = Group)) +
+  geom_density(alpha = 0.4) +
+  labs(
+    title = "Distribution of M-values: GBM vs LGG",
+    x = "M-value",
+    y = "Density"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.title = element_blank()
+  )
+```
+## save OUTPUT
+```{r}
+### GBM
+meth_GBM %>% write.table(gzfile(paste0(outpath,"TCGA_GBM_mval_methylation.tsv.gz")),sep="\t",col.names = T,row.names =T,quote = F)
+
+batch_info %>% write.table(paste0(outpath,"TCGA_GBM_batch_methylation.csv"),sep=",",col.names = T,row.names =F,quote = F)
+
+### LGG
+meth_LGG %>% write.table(gzfile(paste0(outpath,"TCGA_LGG_mval_methylation.tsv.gz")),sep="\t",col.names = T,row.names =T,quote = F)
+```
+
+
+## References
+
+- https://zwdzwd.github.io/InfiniumAnnotation
+- https://nbis-workshop-epigenomics.readthedocs.io/en/latest/content/tutorials/methylationArray/Array_Tutorial.html#normalization
