@@ -1,5 +1,31 @@
 Interpretable Glioma Classification via Cluster-Guided Multi-Omics Modelling
 
+A reproducible pipeline for interpretable glioma subtype classification on TCGA GBM/LGG using multi-omics integration with MOFA+, consensus clustering, supervised classification, and SHAP explanations.
+
+Table of Contents
+
+Development Environment
+
+Folder Structure
+
+Code
+
+Data
+
+Usage
+
+Run on Google Colab
+
+Run Locally
+
+R Markdown Execution Guide
+
+Notes
+
+
+
+## Interpretable Glioma Classification via Cluster-Guided Multi-Omics Modelling
+
 1. Development Environment
 For  Python notebook( .ipynb) file:
 ●	We performed the majority of this project using Google Colab for accessibility and ease of use. So, you do not need to download the .ipynb files.
